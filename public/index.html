@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cryptus</title>
+    <meta name="description" content="Privater Zwei-Personen-Chat mit Bildnachrichten und unkenntlichen gelesenen Nachrichten." />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section id="authView" class="auth-view" aria-labelledby="authTitle">
+        <div class="brand-mark" aria-hidden="true">
+          <span>C</span>
+        </div>
+        <h1 id="authTitle">Cryptus</h1>
+
+        <form id="loginForm" class="auth-panel">
+          <label class="field-label" for="passwordInput">Passwort</label>
+          <input id="passwordInput" name="password" type="password" autocomplete="current-password" required />
+
+          <button class="primary-button" type="submit">Einloggen</button>
+          <p id="loginError" class="form-error" role="alert"></p>
+        </form>
+      </section>
+
+      <section id="chatView" class="chat-view hidden" aria-label="Cryptus Chat">
+        <header class="topbar">
+          <div class="peer-block">
+            <div class="avatar" id="peerAvatar">B</div>
+            <div>
+              <h2 id="peerName">User B</h2>
+              <p id="peerStatus">Offline</p>
+            </div>
+          </div>
+
+          <div class="topbar-actions">
+            <span id="selfBadge" class="self-badge">User A</span>
+            <button id="logoutButton" class="icon-button" type="button" title="Abmelden" aria-label="Abmelden">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M10 17l5-5-5-5" />
+                <path d="M15 12H3" />
+                <path d="M14 3h5a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-5" />
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <div id="messageList" class="messages" aria-live="polite"></div>
+
+        <div id="attachmentPreview" class="attachment-preview hidden">
+          <img id="attachmentImage" alt="" />
+          <div class="attachment-meta">
+            <strong id="attachmentName"></strong>
+            <span id="attachmentSize"></span>
+          </div>
+          <button id="removeAttachmentButton" class="icon-button" type="button" title="Bild entfernen" aria-label="Bild entfernen">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <form id="composerForm" class="composer">
+          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+
+          <button id="emojiButton" class="icon-button" type="button" title="Emoji" aria-label="Emoji">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+              <path d="M9 9h.01" />
+              <path d="M15 9h.01" />
+            </svg>
+          </button>
+
+          <div id="emojiPicker" class="emoji-picker hidden" aria-label="Emoji-Auswahl"></div>
+
+          <button id="attachButton" class="icon-button" type="button" title="Bild anhängen" aria-label="Bild anhängen">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 1 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
+
+          <label class="sr-only" for="messageInput">Nachricht</label>
+          <textarea id="messageInput" rows="1" maxlength="4000" placeholder="Nachricht schreiben"></textarea>
+
+          <button id="sendButton" class="send-button" type="submit" title="Senden" aria-label="Senden">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m22 2-7 20-4-9-9-4Z" />
+              <path d="M22 2 11 13" />
+            </svg>
+          </button>
+        </form>
+      </section>
+    </main>
+
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="Bild ansehen">
+      <button id="closeLightboxButton" class="icon-button lightbox-close" type="button" title="Schließen" aria-label="Schließen">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18 6 6 18" />
+          <path d="m6 6 12 12" />
+        </svg>
+      </button>
+      <img id="lightboxImage" alt="" />
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

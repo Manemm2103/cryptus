@@ -1,0 +1,16 @@
+services:
+  cryptus:
+    build: .
+    container_name: cryptus
+    env_file:
+      - .env
+    environment:
+      PORT: "${PORT:-3000}"
+      DATA_DIR: /app/data
+      MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-8}"
+      SESSION_TTL_HOURS: "${SESSION_TTL_HOURS:-12}"
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
