@@ -181,6 +181,13 @@ async function handleRequest(req, res) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/messages/read-all") {
+    const session = requireSession(req, url);
+    await cleanupExpiredMessages();
+    await handleReadAllMessages(res, session.user);
+    return;
+  }
+
   const editMatch = pathname.match(/^\/api\/messages\/([0-9a-f-]+)$/i);
   if (req.method === "PATCH" && editMatch) {
     const session = requireSession(req, url);
@@ -383,19 +390,37 @@ async function handleReadMessage(res, user, messageId) {
   }
 
   if (!message.readAt) {
-    message.readAt = Date.now();
-    message.text = "";
-
-    if (message.image && message.image.filename) {
-      await deleteUpload(message.image.filename);
-      message.image = null;
-    }
-
+    await markMessageRead(message);
     await saveState();
     broadcastState();
   }
 
   sendJson(res, 200, { message: safeMessageFor(message, user) });
+}
+
+async function handleReadAllMessages(res, user) {
+  const unreadMessages = state.messages.filter((message) => message.recipient === user && !message.readAt);
+
+  for (const message of unreadMessages) {
+    await markMessageRead(message);
+  }
+
+  if (unreadMessages.length > 0) {
+    await saveState();
+    broadcastState();
+  }
+
+  sendJson(res, 200, { ok: true, count: unreadMessages.length });
+}
+
+async function markMessageRead(message) {
+  message.readAt = Date.now();
+  message.text = "";
+
+  if (message.image && message.image.filename) {
+    await deleteUpload(message.image.filename);
+    message.image = null;
+  }
 }
 
 async function handleMedia(req, res, user, messageId) {

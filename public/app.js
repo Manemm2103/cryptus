@@ -9,6 +9,7 @@ const elements = {
   peerAvatar: document.getElementById("peerAvatar"),
   peerName: document.getElementById("peerName"),
   peerStatus: document.getElementById("peerStatus"),
+  markAllReadButton: document.getElementById("markAllReadButton"),
   selfBadge: document.getElementById("selfBadge"),
   logoutButton: document.getElementById("logoutButton"),
   messageList: document.getElementById("messageList"),
@@ -68,6 +69,8 @@ const emojis = [
   "🎵", "🎬", "💡", "🧠", "💊", "🧾", "💰", "💎",
 ];
 
+const supportedImageTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+
 const state = {
   token: "",
   user: "",
@@ -88,6 +91,7 @@ const state = {
   typingSentAt: 0,
   knownMessageIds: new Set(),
   hasMessageSnapshot: false,
+  unreadCount: 0,
   audioContext: null,
   audioUnlocked: false,
   openMenuMessageId: null,
@@ -125,6 +129,7 @@ function bindEvents() {
   });
 
   elements.logoutButton.addEventListener("click", logout);
+  elements.markAllReadButton.addEventListener("click", markAllRead);
 
   elements.composerForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -135,6 +140,8 @@ function bindEvents() {
     autoResizeTextarea();
     noteTyping();
   });
+
+  elements.messageInput.addEventListener("paste", handleMessagePaste);
 
   elements.messageInput.addEventListener("blur", () => {
     sendTyping(false);
@@ -193,6 +200,7 @@ function bindEvents() {
 
   document.addEventListener("pointerdown", unlockNotificationSound, { once: true });
   document.addEventListener("keydown", unlockNotificationSound, { once: true });
+  document.addEventListener("paste", handleDocumentPaste);
 
   window.addEventListener("beforeunload", () => {
     sendTyping(false, { keepalive: true });
@@ -385,6 +393,20 @@ async function markRead(messageId, button) {
   }
 }
 
+async function markAllRead() {
+  if (state.unreadCount === 0) {
+    return;
+  }
+
+  elements.markAllReadButton.disabled = true;
+  try {
+    await api("/api/messages/read-all", { method: "POST", body: {} });
+  } catch (error) {
+    alert(error.message);
+    updateMarkAllReadButton();
+  }
+}
+
 function startReply(message) {
   if (message.redacted) {
     return;
@@ -503,6 +525,7 @@ function renderHeader() {
   elements.peerStatus.textContent = getPeerStatus(peer);
   elements.peerStatus.classList.toggle("typing", Boolean(peer.typing));
   elements.selfBadge.textContent = self.label;
+  updateMarkAllReadButton();
   renderTypingIndicator(peer);
 }
 
@@ -531,6 +554,7 @@ function renderTypingIndicator(peer) {
 function updateMessageNotifications(messages) {
   const nextIds = new Set(messages.map((message) => message.id));
   const unreadCount = messages.filter((message) => !message.own && !message.readAt && !message.redacted).length;
+  state.unreadCount = unreadCount;
 
   document.title = unreadCount > 0 ? `(${unreadCount}) Cryptus` : "Cryptus";
 
@@ -549,6 +573,15 @@ function updateMessageNotifications(messages) {
 
   state.knownMessageIds = nextIds;
   state.hasMessageSnapshot = true;
+}
+
+function updateMarkAllReadButton() {
+  const hasUnread = state.unreadCount > 0;
+  elements.markAllReadButton.classList.toggle("hidden", !hasUnread);
+  elements.markAllReadButton.disabled = !hasUnread;
+  elements.markAllReadButton.querySelector("span").textContent = hasUnread
+    ? `Alle gelesen (${state.unreadCount})`
+    : "Alle gelesen";
 }
 
 function renderMessages() {
@@ -806,6 +839,108 @@ function renderEmojiPicker() {
   }
 }
 
+function handleMessagePaste(event) {
+  if (!state.token || elements.messageInput.disabled) {
+    return;
+  }
+
+  const pastedImage = getClipboardImage(event.clipboardData);
+  if (!pastedImage) {
+    return;
+  }
+
+  event.preventDefault();
+
+  if (state.editingMessage) {
+    alert("Beim Bearbeiten kann kein neues Bild eingefügt werden.");
+    return;
+  }
+
+  selectImage(prepareClipboardImage(pastedImage));
+  elements.messageInput.focus();
+}
+
+function handleDocumentPaste(event) {
+  if (event.target === elements.messageInput || elements.chatView.classList.contains("hidden")) {
+    return;
+  }
+
+  if (isTextInputTarget(event.target)) {
+    return;
+  }
+
+  handleMessagePaste(event);
+}
+
+function isTextInputTarget(target) {
+  const element = target instanceof Element ? target : target && target.parentElement;
+  if (!element) {
+    return false;
+  }
+
+  return Boolean(element.closest("input, textarea, [contenteditable]"));
+}
+
+function getClipboardImage(clipboardData) {
+  if (!clipboardData) {
+    return null;
+  }
+
+  for (const item of Array.from(clipboardData.items || [])) {
+    if (item.kind === "file" && supportedImageTypes.has(item.type)) {
+      return item.getAsFile();
+    }
+  }
+
+  return Array.from(clipboardData.files || []).find((file) => supportedImageTypes.has(file.type)) || null;
+}
+
+function prepareClipboardImage(file) {
+  if (!file) {
+    return null;
+  }
+
+  const genericNames = new Set(["", "image.png", "image.jpg", "image.jpeg", "image.gif", "image.webp"]);
+  if (!genericNames.has((file.name || "").toLowerCase())) {
+    return file;
+  }
+
+  const type = file.type || "image/png";
+  const extension = getImageExtension(type);
+  return new File([file], `zwischenablage-${formatFileTimestamp(new Date())}.${extension}`, {
+    type,
+    lastModified: Date.now(),
+  });
+}
+
+function getImageExtension(mimeType) {
+  if (mimeType === "image/jpeg") {
+    return "jpg";
+  }
+
+  if (mimeType === "image/webp") {
+    return "webp";
+  }
+
+  if (mimeType === "image/gif") {
+    return "gif";
+  }
+
+  return "png";
+}
+
+function formatFileTimestamp(date) {
+  const parts = [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+    String(date.getHours()).padStart(2, "0"),
+    String(date.getMinutes()).padStart(2, "0"),
+    String(date.getSeconds()).padStart(2, "0"),
+  ];
+  return `${parts[0]}${parts[1]}${parts[2]}-${parts[3]}${parts[4]}${parts[5]}`;
+}
+
 function noteTyping() {
   if (!state.token || elements.messageInput.disabled) {
     return;
@@ -877,8 +1012,8 @@ function sendTyping(typing, options = {}) {
 }
 
 function selectImage(file) {
-  if (!file.type.startsWith("image/")) {
-    alert("Bitte ein Bild auswählen.");
+  if (!file || !supportedImageTypes.has(file.type)) {
+    alert("Bitte ein PNG-, JPG-, WEBP- oder GIF-Bild auswählen.");
     return;
   }
 
