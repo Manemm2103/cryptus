@@ -5,7 +5,8 @@ param(
     [string]$RepoName = "cryptus",
     [string]$Branch = "main",
     [string]$Message = "Update cryptus",
-    [switch]$CreateRepo
+    [switch]$CreateRepo,
+    [switch]$NoPull
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,7 +89,11 @@ function Get-GithubOwnerFromGh {
     return ""
 }
 
-if (-not $RemoteUrl) {
+if ($CreateRepo) {
+
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        throw "GitHub CLI 'gh' is required for -CreateRepo. Install it or create the repo manually on GitHub."
+    }
 
     if (-not $GithubOwner) {
         $GithubOwner = Get-GithubOwnerFromGh
@@ -100,17 +105,6 @@ if (-not $RemoteUrl) {
 
     if (-not $GithubOwner) {
         throw "No GitHub owner was provided."
-    }
-
-    $RemoteUrl = "https://github.com/$GithubOwner/$RepoName.git"
-}
-
-Write-Host "Using remote: $RemoteUrl"
-
-if ($CreateRepo) {
-
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        throw "GitHub CLI 'gh' is required for -CreateRepo. Install it or create the repo manually on GitHub."
     }
 
     $RepoRef = "$GithubOwner/$RepoName"
@@ -213,17 +207,49 @@ finally {
 
 $HasOrigin = ($RemoteExitCode -eq 0)
 
+if (-not $RemoteUrl) {
+    if ($HasOrigin) {
+        $RemoteUrl = $ExistingOrigin.Trim()
+    }
+    else {
+        if (-not $GithubOwner) {
+            $GithubOwner = Get-GithubOwnerFromGh
+        }
+
+        if (-not $GithubOwner) {
+            $GithubOwner = Read-Host "GitHub username or organization"
+        }
+
+        if (-not $GithubOwner) {
+            throw "No GitHub owner was provided."
+        }
+
+        $RemoteUrl = "https://github.com/$GithubOwner/$RepoName.git"
+    }
+}
+
+Write-Host "Using remote: $RemoteUrl"
+
 if ($HasOrigin) {
 
-    Write-Host "Updating origin remote..."
+    if ($ExistingOrigin.Trim() -ne $RemoteUrl) {
+        Write-Host "Updating origin remote..."
 
-    Invoke-Git remote set-url origin $RemoteUrl
+        Invoke-Git remote set-url origin $RemoteUrl
+    }
 }
 else {
 
     Write-Host "Adding origin remote..."
 
     Invoke-Git remote add origin $RemoteUrl
+}
+
+if (-not $NoPull) {
+
+    Write-Host "Pulling latest remote changes..."
+
+    Invoke-Git pull --rebase --autostash origin $Branch
 }
 
 Write-Host "Pushing branch '$Branch'..."
