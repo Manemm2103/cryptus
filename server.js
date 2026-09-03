@@ -22,6 +22,8 @@ const TYPING_TTL_MS = 3500;
 const MESSAGE_MAX_AGE_MS = Number(process.env.MESSAGE_MAX_HOURS || 24) * 60 * 60 * 1000;
 const READ_RETENTION_MS = Number(process.env.READ_DELETE_MINUTES || 30) * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 60 * 1000;
+const VERSION_FILE = path.join(ROOT_DIR, "version.json");
+const APP_VERSION = loadAppVersion();
 
 const REQUIRED_ENV = ["USER_A_PASSWORD", "USER_B_PASSWORD"];
 const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
@@ -139,13 +141,16 @@ async function handleRequest(req, res) {
   const pathname = decodeURIComponent(url.pathname);
 
   if (req.method === "GET" && pathname === "/api/health") {
-    sendJson(res, 200, { ok: true, name: "cryptus" });
+    sendJson(res, 200, { ok: true, name: "cryptus", version: APP_VERSION.version });
     return;
   }
 
   if (req.method === "GET" && pathname === "/api/config") {
     sendJson(res, 200, {
       maxUploadMb: MAX_UPLOAD_MB,
+      version: APP_VERSION.version,
+      versionDate: APP_VERSION.date,
+      versionSequence: APP_VERSION.sequence,
       users: publicUsers(),
     });
     return;
@@ -732,6 +737,9 @@ function safeStateFor(user) {
       sessionTtlHours: SESSION_TTL_MS / 60 / 60 / 1000,
       messageMaxHours: MESSAGE_MAX_AGE_MS / 60 / 60 / 1000,
       readDeleteMinutes: READ_RETENTION_MS / 60 / 1000,
+      version: APP_VERSION.version,
+      versionDate: APP_VERSION.date,
+      versionSequence: APP_VERSION.sequence,
     },
     messages: state.messages.map((message) => safeMessageFor(message, user)),
   };
@@ -828,6 +836,33 @@ function createUserState(source = {}) {
       return [user, { lastSeenAt: value }];
     }),
   );
+}
+
+function loadAppVersion() {
+  const fallbackDate = new Date().toISOString().slice(0, 10);
+  const fallbackVersion = `${fallbackDate.replaceAll("-", ".")}.1`;
+
+  try {
+    const raw = fs.readFileSync(VERSION_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const version = String(parsed.version || "").trim();
+    const date = String(parsed.date || "").trim();
+    const sequence = Number(parsed.sequence || 0);
+
+    if (version && date && Number.isInteger(sequence) && sequence > 0) {
+      return { version, date, sequence };
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.error("Could not read version.json:", error.message);
+    }
+  }
+
+  return {
+    version: process.env.APP_VERSION || fallbackVersion,
+    date: fallbackDate,
+    sequence: 1,
+  };
 }
 
 function setLastSeen(user, timestamp = Date.now()) {

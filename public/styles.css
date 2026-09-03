@@ -147,6 +147,13 @@ button {
   font-size: 0.9rem;
 }
 
+.app-version {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
 .chat-view {
   width: min(980px, 100%);
   height: min(860px, calc(100vh - 40px));
@@ -263,6 +270,20 @@ button {
   color: var(--accent-strong);
   background: var(--accent-soft);
   font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.version-chip {
+  max-width: 128px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.62);
+  font-size: 0.76rem;
   font-weight: 800;
 }
 
@@ -848,6 +869,10 @@ button {
   }
 
   .mark-all-read-button span {
+    display: none;
+  }
+
+  .version-chip {
     display: none;
   }
 

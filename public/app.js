@@ -6,11 +6,13 @@ const elements = {
   loginForm: document.getElementById("loginForm"),
   loginError: document.getElementById("loginError"),
   passwordInput: document.getElementById("passwordInput"),
+  authVersion: document.getElementById("authVersion"),
   peerAvatar: document.getElementById("peerAvatar"),
   peerName: document.getElementById("peerName"),
   peerStatus: document.getElementById("peerStatus"),
   markAllReadButton: document.getElementById("markAllReadButton"),
   selfBadge: document.getElementById("selfBadge"),
+  chatVersion: document.getElementById("chatVersion"),
   logoutButton: document.getElementById("logoutButton"),
   messageList: document.getElementById("messageList"),
   typingIndicator: document.getElementById("typingIndicator"),
@@ -76,7 +78,7 @@ const state = {
   user: "",
   peer: "",
   users: {},
-  config: { maxUploadMb: 8 },
+  config: { maxUploadMb: 8, version: "" },
   messages: [],
   messageRenderKey: null,
   events: null,
@@ -102,6 +104,7 @@ initialize();
 function initialize() {
   renderEmojiPicker();
   bindEvents();
+  loadPublicConfig();
   restoreSession();
 }
 
@@ -297,7 +300,7 @@ function applySnapshot(snapshot) {
 
   state.peer = snapshot.peer;
   state.users = snapshot.users || {};
-  state.config = snapshot.config || state.config;
+  applyConfig(snapshot.config || {});
   updateMessageNotifications(messages);
   state.messages = messages;
   renderHeader();
@@ -391,6 +394,20 @@ async function markRead(messageId, button) {
     alert(error.message);
     button.disabled = false;
   }
+}
+
+async function loadPublicConfig() {
+  try {
+    const config = await api("/api/config", { anonymous: true });
+    applyConfig(config);
+  } catch (error) {
+    renderVersion();
+  }
+}
+
+function applyConfig(config) {
+  state.config = { ...state.config, ...config };
+  renderVersion();
 }
 
 async function markAllRead() {
@@ -527,6 +544,16 @@ function renderHeader() {
   elements.selfBadge.textContent = self.label;
   updateMarkAllReadButton();
   renderTypingIndicator(peer);
+}
+
+function renderVersion() {
+  const version = String(state.config.version || "").trim();
+  const label = version ? `v${version}` : "";
+
+  elements.authVersion.textContent = label;
+  elements.chatVersion.textContent = label;
+  elements.authVersion.classList.toggle("hidden", !version);
+  elements.chatVersion.classList.toggle("hidden", !version);
 }
 
 function getPeerStatus(peer) {

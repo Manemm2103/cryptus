@@ -7,6 +7,7 @@ ENV PORT=3000
 ENV DATA_DIR=/app/data
 
 COPY package.json ./
+COPY version.json ./
 COPY server.js ./
 COPY public ./public
 

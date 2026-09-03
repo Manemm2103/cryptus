@@ -6,7 +6,8 @@ param(
     [string]$Branch = "main",
     [string]$Message = "Update cryptus",
     [switch]$CreateRepo,
-    [switch]$NoPull
+    [switch]$NoPull,
+    [switch]$NoVersionBump
 )
 
 $ErrorActionPreference = "Stop"
@@ -162,6 +163,41 @@ else {
     if ($CurrentBranch -and $CurrentBranch -ne $Branch) {
         Write-Host "Renaming branch '$CurrentBranch' to '$Branch'..."
         Invoke-Git branch -M $Branch
+    }
+}
+
+if (-not $NoVersionBump) {
+
+    $VersionScript = Join-Path $PSScriptRoot "bump-version.ps1"
+    $VersionAlreadyChanged = $false
+
+    if (Test-Path -LiteralPath ".git") {
+
+        $OldErrorActionPreference = $ErrorActionPreference
+
+        try {
+            $ErrorActionPreference = "Continue"
+
+            $VersionStatus = (& git status --porcelain -- version.json)
+            $VersionStatusExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $OldErrorActionPreference
+        }
+
+        if ($VersionStatusExitCode -ne 0) {
+            throw "Could not determine version status."
+        }
+
+        $VersionAlreadyChanged = [bool]$VersionStatus
+    }
+
+    if ($VersionAlreadyChanged) {
+        Write-Host "Version already changed."
+    }
+    else {
+        Write-Host "Updating version..."
+        & $VersionScript
     }
 }
 
