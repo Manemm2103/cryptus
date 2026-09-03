@@ -1,7 +1,7 @@
 {
   "name": "cryptus",
   "version": "0.1.0",
-  "description": "Two-person private chat with per-user passwords, read redaction, emoji support, and image messages.",
+  "description": "Two-person private chat with per-user passwords, read redaction, emoji support, and media messages.",
   "private": true,
   "type": "commonjs",
   "scripts": {

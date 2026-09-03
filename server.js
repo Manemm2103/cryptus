@@ -13,7 +13,7 @@ const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT_DIR, "data"));
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const STATE_FILE = path.join(DATA_DIR, "state.json");
-const MAX_UPLOAD_MB = Math.max(1, Number(process.env.MAX_UPLOAD_MB || 8));
+const MAX_UPLOAD_MB = Math.max(1, Number(process.env.MAX_UPLOAD_MB || 32));
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 const MAX_JSON_BYTES = Math.ceil(MAX_UPLOAD_BYTES * 1.45) + 512 * 1024;
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_HOURS || 12) * 60 * 60 * 1000;
@@ -51,11 +51,14 @@ const USERS = {
   },
 };
 
-const ALLOWED_IMAGE_TYPES = new Map([
-  ["image/jpeg", "jpg"],
-  ["image/png", "png"],
-  ["image/webp", "webp"],
-  ["image/gif", "gif"],
+const ALLOWED_MEDIA_TYPES = new Map([
+  ["image/jpeg", { extension: "jpg", kind: "image" }],
+  ["image/png", { extension: "png", kind: "image" }],
+  ["image/webp", { extension: "webp", kind: "image" }],
+  ["image/gif", { extension: "gif", kind: "image" }],
+  ["video/mp4", { extension: "mp4", kind: "video" }],
+  ["video/webm", { extension: "webm", kind: "video" }],
+  ["video/quicktime", { extension: "mov", kind: "video" }],
 ]);
 
 const MIME_TYPES = {
@@ -68,6 +71,9 @@ const MIME_TYPES = {
   ".jpeg": "image/jpeg",
   ".webp": "image/webp",
   ".gif": "image/gif",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".mov": "video/quicktime",
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
 };
@@ -304,21 +310,21 @@ async function handleCreateMessage(req, res, sender) {
   const body = await readJson(req, MAX_JSON_BYTES);
   const text = sanitizeText(body.text || "");
   const hasText = text.trim().length > 0;
-  const imagePayload = body.image || null;
-  const hasImage = Boolean(imagePayload && imagePayload.data);
+  const mediaPayload = body.media || body.image || null;
+  const hasMedia = Boolean(mediaPayload && mediaPayload.data);
   const replyTo = body.replyTo ? createReplyQuote(String(body.replyTo), sender) : null;
 
-  if (!hasText && !hasImage) {
-    sendJson(res, 400, { error: "Nachricht oder Bild fehlt." });
+  if (!hasText && !hasMedia) {
+    sendJson(res, 400, { error: "Nachricht, Bild oder Video fehlt." });
     return;
   }
 
   const id = crypto.randomUUID();
   const recipient = peerOf(sender);
-  let image = null;
+  let media = null;
 
-  if (hasImage) {
-    image = await persistImage(id, imagePayload);
+  if (hasMedia) {
+    media = await persistMedia(id, mediaPayload);
   }
 
   const message = {
@@ -326,7 +332,7 @@ async function handleCreateMessage(req, res, sender) {
     sender,
     recipient,
     text: hasText ? text : "",
-    image,
+    media,
     replyTo,
     createdAt: Date.now(),
     editedAt: null,
@@ -360,7 +366,7 @@ async function handleEditMessage(req, res, user, messageId) {
 
   const body = await readJson(req, 32 * 1024);
   const text = sanitizeText(body.text || "");
-  if (!text.trim() && !message.image) {
+  if (!text.trim() && !getMessageMedia(message)) {
     sendJson(res, 400, { error: "Nachricht darf nicht leer sein." });
     return;
   }
@@ -421,38 +427,35 @@ async function handleReadAllMessages(res, user) {
 async function markMessageRead(message) {
   message.readAt = Date.now();
   message.text = "";
-
-  if (message.image && message.image.filename) {
-    await deleteUpload(message.image.filename);
-    message.image = null;
-  }
+  await deleteMessageMedia(message);
 }
 
 async function handleMedia(req, res, user, messageId) {
   const message = state.messages.find((item) => item.id === messageId);
+  const media = getMessageMedia(message);
 
   if (!message || (message.sender !== user && message.recipient !== user)) {
-    sendJson(res, 404, { error: "Bild nicht gefunden." });
+    sendJson(res, 404, { error: "Medium nicht gefunden." });
     return;
   }
 
-  if (message.readAt || !message.image) {
-    sendJson(res, 410, { error: "Bild wurde unkenntlich gemacht." });
+  if (message.readAt || !media) {
+    sendJson(res, 410, { error: "Medium wurde unkenntlich gemacht." });
     return;
   }
 
-  const filePath = safeUploadPath(message.image.filename);
+  const filePath = safeUploadPath(media.filename);
   const stat = await fsp.stat(filePath).catch(() => null);
   if (!stat || !stat.isFile()) {
-    sendJson(res, 404, { error: "Bilddatei fehlt." });
+    sendJson(res, 404, { error: "Mediendatei fehlt." });
     return;
   }
 
   res.writeHead(200, {
-    "Content-Type": message.image.mimeType,
+    "Content-Type": media.mimeType,
     "Content-Length": stat.size,
     "Cache-Control": "no-store",
-    "Content-Disposition": `inline; filename="${message.image.originalName || "cryptus-image"}"`,
+    "Content-Disposition": `inline; filename="${media.originalName || "cryptus-media"}"`,
   });
 
   if (req.method === "HEAD") {
@@ -498,41 +501,43 @@ async function serveStatic(req, res, pathname) {
   fs.createReadStream(filePath).pipe(res);
 }
 
-async function persistImage(messageId, payload) {
+async function persistMedia(messageId, payload) {
   const mimeType = String(payload.type || "").toLowerCase();
-  const extension = ALLOWED_IMAGE_TYPES.get(mimeType);
+  const mediaType = ALLOWED_MEDIA_TYPES.get(mimeType);
 
-  if (!extension) {
-    throw httpError(415, "Nur JPEG, PNG, WebP und GIF sind erlaubt.");
+  if (!mediaType) {
+    throw httpError(415, "Nur JPEG, PNG, WebP, GIF, MP4, WebM und MOV sind erlaubt.");
   }
 
   const dataUrl = String(payload.data || "");
   const match = dataUrl.match(/^data:([^;,]+);base64,([a-z0-9+/=\s]+)$/i);
   if (!match || match[1].toLowerCase() !== mimeType) {
-    throw httpError(400, "Bilddaten sind ungueltig.");
+    throw httpError(400, "Mediendaten sind ungueltig.");
   }
 
   const buffer = Buffer.from(match[2].replace(/\s/g, ""), "base64");
   if (buffer.length === 0 || buffer.length > MAX_UPLOAD_BYTES) {
-    throw httpError(413, `Bilder duerfen maximal ${MAX_UPLOAD_MB} MB gross sein.`);
+    throw httpError(413, `Medien duerfen maximal ${MAX_UPLOAD_MB} MB gross sein.`);
   }
 
-  if (!looksLikeImage(buffer, mimeType)) {
-    throw httpError(415, "Bildtyp passt nicht zu den Bilddaten.");
+  if (!looksLikeMedia(buffer, mimeType)) {
+    throw httpError(415, "Dateityp passt nicht zu den Mediendaten.");
   }
 
-  const filename = `${messageId}.${extension}`;
+  const filename = `${messageId}.${mediaType.extension}`;
   await fsp.writeFile(safeUploadPath(filename), buffer, { flag: "wx" });
 
   return {
     filename,
-    originalName: sanitizeFileName(payload.name || `cryptus.${extension}`),
+    originalName: sanitizeFileName(payload.name || `cryptus.${mediaType.extension}`),
     mimeType,
+    kind: mediaType.kind,
     size: buffer.length,
+    viewOnce: Boolean(payload.viewOnce),
   };
 }
 
-function looksLikeImage(buffer, mimeType) {
+function looksLikeMedia(buffer, mimeType) {
   if (mimeType === "image/png") {
     return buffer.length > 8 && buffer.slice(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"));
   }
@@ -548,6 +553,14 @@ function looksLikeImage(buffer, mimeType) {
 
   if (mimeType === "image/webp") {
     return buffer.length > 12 && buffer.slice(0, 4).toString("ascii") === "RIFF" && buffer.slice(8, 12).toString("ascii") === "WEBP";
+  }
+
+  if (mimeType === "video/mp4" || mimeType === "video/quicktime") {
+    return buffer.length > 12 && buffer.slice(4, 8).toString("ascii") === "ftyp";
+  }
+
+  if (mimeType === "video/webm") {
+    return buffer.length > 4 && buffer.slice(0, 4).equals(Buffer.from("1a45dfa3", "hex"));
   }
 
   return false;
@@ -639,9 +652,7 @@ async function cleanupExpiredMessages(options = {}) {
 
   state.messages = keptMessages;
   for (const message of removedMessages) {
-    if (message.image && message.image.filename) {
-      await deleteUpload(message.image.filename);
-    }
+    await deleteMessageMedia(message);
   }
 
   await saveState();
@@ -748,6 +759,16 @@ function safeStateFor(user) {
 function safeMessageFor(message, user) {
   const redacted = Boolean(message.readAt);
   const allowed = message.sender === user || message.recipient === user;
+  const media = getMessageMedia(message);
+  const safeMedia = !redacted && allowed && media
+    ? {
+        name: media.originalName,
+        mimeType: media.mimeType,
+        kind: getMediaKind(media),
+        size: media.size,
+        viewOnce: Boolean(media.viewOnce),
+      }
+    : null;
 
   return {
     id: message.id,
@@ -761,14 +782,48 @@ function safeMessageFor(message, user) {
     canEdit: !redacted && message.sender === user && !message.readAt,
     replyTo: !redacted && allowed && message.replyTo ? safeReplyQuote(message.replyTo) : null,
     text: !redacted && allowed ? message.text : "",
-    image: !redacted && allowed && message.image
-      ? {
-          name: message.image.originalName,
-          mimeType: message.image.mimeType,
-          size: message.image.size,
-        }
-      : null,
+    media: safeMedia,
+    image: safeMedia && safeMedia.kind === "image" ? safeMedia : null,
   };
+}
+
+function getMessageMedia(message) {
+  if (!message) {
+    return null;
+  }
+
+  return message.media || message.image || null;
+}
+
+function getMediaKind(media) {
+  if (!media) {
+    return "";
+  }
+
+  if (media.kind === "image" || media.kind === "video") {
+    return media.kind;
+  }
+
+  const mimeType = String(media.mimeType || "").toLowerCase();
+  if (mimeType.startsWith("video/")) {
+    return "video";
+  }
+
+  if (mimeType.startsWith("image/")) {
+    return "image";
+  }
+
+  return "";
+}
+
+async function deleteMessageMedia(message) {
+  const media = getMessageMedia(message);
+  if (media && media.filename) {
+    await deleteUpload(media.filename);
+  }
+
+  message.media = null;
+  message.image = null;
 }
 
 function createReplyQuote(messageId, user) {
@@ -782,7 +837,9 @@ function createReplyQuote(messageId, user) {
     id: target.id,
     sender: target.sender,
     text: summarizeMessage(target),
-    hasImage: Boolean(target.image),
+    hasImage: getMediaKind(getMessageMedia(target)) === "image",
+    hasMedia: Boolean(getMessageMedia(target)),
+    mediaKind: getMediaKind(getMessageMedia(target)),
     createdAt: target.createdAt,
   };
 }
@@ -793,18 +850,26 @@ function safeReplyQuote(replyTo) {
     sender: replyTo.sender,
     text: replyTo.text || "",
     hasImage: Boolean(replyTo.hasImage),
+    hasMedia: Boolean(replyTo.hasMedia || replyTo.hasImage),
+    mediaKind: replyTo.mediaKind || (replyTo.hasImage ? "image" : ""),
     createdAt: replyTo.createdAt || null,
   };
 }
 
 function summarizeMessage(message) {
+  const media = getMessageMedia(message);
+  const mediaKind = getMediaKind(media);
   const text = String(message.text || "").replace(/\s+/g, " ").trim();
   if (text) {
     return text.length > 140 ? `${text.slice(0, 137)}...` : text;
   }
 
-  if (message.image) {
-    return "Bild";
+  if (mediaKind === "image") {
+    return media.viewOnce ? "Einmalansicht Bild" : "Bild";
+  }
+
+  if (mediaKind === "video") {
+    return media.viewOnce ? "Einmalansicht Video" : "Video";
   }
 
   return "Nachricht";

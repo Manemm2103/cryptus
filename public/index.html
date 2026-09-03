@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Cryptus</title>
-    <meta name="description" content="Privater Zwei-Personen-Chat mit Bildnachrichten und unkenntlichen gelesenen Nachrichten." />
+    <meta name="description" content="Privater Zwei-Personen-Chat mit Mediennachrichten und unkenntlichen gelesenen Nachrichten." />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -83,11 +83,17 @@
 
         <div id="attachmentPreview" class="attachment-preview hidden">
           <img id="attachmentImage" alt="" />
+          <video id="attachmentVideo" class="hidden" muted playsinline></video>
           <div class="attachment-meta">
             <strong id="attachmentName"></strong>
             <span id="attachmentSize"></span>
           </div>
-          <button id="removeAttachmentButton" class="icon-button" type="button" title="Bild entfernen" aria-label="Bild entfernen">
+          <label class="view-once-toggle" title="Einmal ansehen">
+            <input id="viewOnceInput" type="checkbox" />
+            <span aria-hidden="true">1</span>
+            <strong>Einmal ansehen</strong>
+          </label>
+          <button id="removeAttachmentButton" class="icon-button" type="button" title="Medium entfernen" aria-label="Medium entfernen">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M18 6 6 18" />
               <path d="m6 6 12 12" />
@@ -96,7 +102,7 @@
         </div>
 
         <form id="composerForm" class="composer">
-          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/quicktime" hidden />
 
           <button id="emojiButton" class="icon-button" type="button" title="Emoji" aria-label="Emoji">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -109,7 +115,7 @@
 
           <div id="emojiPicker" class="emoji-picker hidden" aria-label="Emoji-Auswahl"></div>
 
-          <button id="attachButton" class="icon-button" type="button" title="Bild anhängen" aria-label="Bild anhängen">
+          <button id="attachButton" class="icon-button" type="button" title="Bild oder Video anhängen" aria-label="Bild oder Video anhängen">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 1 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
             </svg>
@@ -128,7 +134,7 @@
       </section>
     </main>
 
-    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="Bild ansehen">
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="Medium ansehen">
       <button id="closeLightboxButton" class="icon-button lightbox-close" type="button" title="Schließen" aria-label="Schließen">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M18 6 6 18" />
@@ -136,6 +142,7 @@
         </svg>
       </button>
       <img id="lightboxImage" alt="" />
+      <video id="lightboxVideo" class="hidden" controls playsinline></video>
     </div>
 
     <script src="/app.js"></script>

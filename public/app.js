@@ -29,11 +29,14 @@ const elements = {
   imageInput: document.getElementById("imageInput"),
   attachmentPreview: document.getElementById("attachmentPreview"),
   attachmentImage: document.getElementById("attachmentImage"),
+  attachmentVideo: document.getElementById("attachmentVideo"),
   attachmentName: document.getElementById("attachmentName"),
   attachmentSize: document.getElementById("attachmentSize"),
+  viewOnceInput: document.getElementById("viewOnceInput"),
   removeAttachmentButton: document.getElementById("removeAttachmentButton"),
   lightbox: document.getElementById("lightbox"),
   lightboxImage: document.getElementById("lightboxImage"),
+  lightboxVideo: document.getElementById("lightboxVideo"),
   closeLightboxButton: document.getElementById("closeLightboxButton"),
 };
 
@@ -72,21 +75,25 @@ const emojis = [
 ];
 
 const supportedImageTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const supportedVideoTypes = new Set(["video/mp4", "video/webm", "video/quicktime"]);
+const supportedMediaTypes = new Set([...supportedImageTypes, ...supportedVideoTypes]);
 
 const state = {
   token: "",
   user: "",
   peer: "",
   users: {},
-  config: { maxUploadMb: 8, version: "" },
+  config: { maxUploadMb: 32, version: "" },
   messages: [],
   messageRenderKey: null,
   events: null,
   selectedImage: null,
   selectedImagePreviewUrl: "",
+  selectedMediaViewOnce: false,
   replyTarget: null,
   editingMessage: null,
   mediaUrls: new Map(),
+  openMediaMessage: null,
   typingTimer: 0,
   typingRequest: null,
   typingSent: false,
@@ -174,6 +181,10 @@ function bindEvents() {
     elements.imageInput.value = "";
   });
 
+  elements.viewOnceInput.addEventListener("change", () => {
+    state.selectedMediaViewOnce = elements.viewOnceInput.checked;
+  });
+
   elements.removeAttachmentButton.addEventListener("click", clearSelectedImage);
   elements.cancelContextButton.addEventListener("click", clearComposerContext);
 
@@ -207,6 +218,7 @@ function bindEvents() {
 
   window.addEventListener("beforeunload", () => {
     sendTyping(false, { keepalive: true });
+    closeLightbox({ keepalive: true });
   });
 }
 
@@ -332,9 +344,10 @@ async function sendMessage() {
     sendTyping(false);
     setComposerEnabled(false);
     if (state.selectedImage) {
-      payload.image = {
+      payload.media = {
         name: state.selectedImage.name,
         type: state.selectedImage.type,
+        viewOnce: state.selectedMediaViewOnce,
         data: await readFileAsDataUrl(state.selectedImage),
       };
     }
@@ -362,7 +375,7 @@ async function saveEditedMessage(text) {
     return;
   }
 
-  if (!text.trim() && !state.editingMessage.image) {
+  if (!text.trim() && !messageHasMedia(state.editingMessage)) {
     return;
   }
 
@@ -434,7 +447,9 @@ function startReply(message) {
     id: message.id,
     sender: message.sender,
     text: getMessagePreviewText(message),
-    hasImage: Boolean(message.image),
+    hasImage: getMessageMediaKind(message) === "image",
+    hasMedia: messageHasMedia(message),
+    mediaKind: getMessageMediaKind(message),
   };
   renderComposerContext();
   elements.messageInput.focus();
@@ -450,7 +465,7 @@ function startEdit(message) {
   state.editingMessage = {
     id: message.id,
     text: message.text || "",
-    image: message.image,
+    media: getMessageMedia(message),
   };
   elements.messageInput.value = message.text || "";
   autoResizeTextarea();
@@ -474,7 +489,9 @@ function syncComposerContext() {
         id: target.id,
         sender: target.sender,
         text: getMessagePreviewText(target),
-        hasImage: Boolean(target.image),
+        hasImage: getMessageMediaKind(target) === "image",
+        hasMedia: messageHasMedia(target),
+        mediaKind: getMessageMediaKind(target),
       };
     }
   }
@@ -489,7 +506,7 @@ function syncComposerContext() {
       state.editingMessage = {
         id: target.id,
         text: target.text || "",
-        image: target.image,
+        media: getMessageMedia(target),
       };
     }
   }
@@ -507,7 +524,7 @@ function renderComposerContext() {
   if (isEditing) {
     elements.contextPreview.classList.add("editing");
     elements.contextTitle.textContent = "Nachricht bearbeiten";
-    elements.contextText.textContent = state.editingMessage.text || (state.editingMessage.image ? "Bild" : "Nachricht");
+    elements.contextText.textContent = state.editingMessage.text || (messageHasMedia(state.editingMessage) ? getMediaLabel(getMessageMedia(state.editingMessage)) : "Nachricht");
     return;
   }
 
@@ -526,8 +543,8 @@ function getMessageRenderKey(messages) {
       message.readAt || "",
       message.editedAt || "",
       message.text || "",
-      message.image ? "image" : "",
-      message.replyTo ? `${message.replyTo.id}:${message.replyTo.text}:${message.replyTo.hasImage ? 1 : 0}` : "",
+      messageHasMedia(message) ? `${getMessageMediaKind(message)}:${getMessageMedia(message).viewOnce ? 1 : 0}` : "",
+      message.replyTo ? `${message.replyTo.id}:${message.replyTo.text}:${message.replyTo.hasImage ? 1 : 0}:${message.replyTo.hasMedia ? 1 : 0}:${message.replyTo.mediaKind || ""}` : "",
       message.canEdit ? 1 : 0,
     ].join("|"))
     .join("~");
@@ -627,7 +644,8 @@ function renderMessages() {
   }
 
   for (const message of state.messages) {
-    if (message.image && !message.redacted) {
+    const media = getMessageMedia(message);
+    if (media && !message.redacted && !media.viewOnce) {
       visibleMedia.add(message.id);
     }
     elements.messageList.append(renderMessage(message));
@@ -640,6 +658,7 @@ function renderMessages() {
 }
 
 function renderMessage(message) {
+  const media = getMessageMedia(message);
   const soloEmoji = isSoloEmojiMessage(message);
   const article = document.createElement("article");
   article.className = `message ${message.own ? "own" : "peer"}${message.redacted ? " redacted" : ""}${soloEmoji ? " solo-emoji" : ""}`;
@@ -683,11 +702,11 @@ function renderMessage(message) {
     article.append(text);
   }
 
-  if (message.image) {
-    article.append(renderImage(message));
+  if (media) {
+    article.append(renderMedia(message, media));
   }
 
-  if (!message.own && !message.readAt) {
+  if (!message.own && !message.readAt && !(media && media.viewOnce)) {
     const readButton = document.createElement("button");
     readButton.className = "read-button";
     readButton.type = "button";
@@ -789,36 +808,102 @@ function renderReplyQuote(replyTo) {
   return quote;
 }
 
-function renderImage(message) {
+function renderMedia(message, media) {
+  if (media.viewOnce) {
+    return renderViewOnceMedia(message, media);
+  }
+
   const holder = document.createElement("button");
-  holder.className = "message-image";
+  const kind = getMediaKind(media);
+  holder.className = `message-media message-${kind}`;
   holder.type = "button";
-  holder.title = "Bild ansehen";
-  holder.setAttribute("aria-label", "Bild ansehen");
+  holder.title = `${getMediaLabel(media)} ansehen`;
+  holder.setAttribute("aria-label", `${getMediaLabel(media)} ansehen`);
 
   const loading = document.createElement("span");
   loading.className = "image-loading";
-  loading.textContent = "Bild lädt";
+  loading.textContent = `${getMediaLabel(media)} lädt`;
   holder.append(loading);
 
   loadMedia(message.id)
     .then((url) => {
       holder.textContent = "";
-      const img = document.createElement("img");
-      img.src = url;
-      img.alt = message.image.name || "Bildnachricht";
-      holder.append(img);
-      holder.addEventListener("click", () => openLightbox(url, img.alt));
+      holder.append(createMediaPreview(media, url));
+      holder.addEventListener("click", () => openLightbox(message, media, url));
     })
     .catch(() => {
       holder.textContent = "";
       const error = document.createElement("span");
       error.className = "image-error";
-      error.textContent = "Bild nicht verfügbar";
+      error.textContent = "Medium nicht verfügbar";
       holder.append(error);
     });
 
   return holder;
+}
+
+function renderViewOnceMedia(message, media) {
+  const button = document.createElement("button");
+  button.className = "view-once-card";
+  button.type = "button";
+  button.title = "Einmalansicht öffnen";
+  button.setAttribute("aria-label", "Einmalansicht öffnen");
+
+  const badge = document.createElement("span");
+  badge.className = "view-once-badge";
+  badge.textContent = "1";
+
+  const copy = document.createElement("span");
+  copy.className = "view-once-copy";
+
+  const title = document.createElement("strong");
+  title.textContent = message.own ? "Einmalansicht gesendet" : "Einmal ansehen";
+
+  const subtitle = document.createElement("span");
+  subtitle.textContent = getMediaLabel(media);
+
+  copy.append(title, subtitle);
+  button.append(badge, copy);
+
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const url = await loadMedia(message.id);
+      openLightbox(message, media, url);
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  return button;
+}
+
+function createMediaPreview(media, url) {
+  if (getMediaKind(media) === "video") {
+    const preview = document.createElement("span");
+    preview.className = "video-preview";
+
+    const video = document.createElement("video");
+    video.src = url;
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+
+    const play = document.createElement("span");
+    play.className = "video-play";
+    play.setAttribute("aria-hidden", "true");
+    play.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7Z"/></svg>';
+
+    preview.append(video, play);
+    return preview;
+  }
+
+  const img = document.createElement("img");
+  img.src = url;
+  img.alt = media.name || "Bildnachricht";
+  return img;
 }
 
 async function loadMedia(messageId) {
@@ -832,7 +917,7 @@ async function loadMedia(messageId) {
   });
 
   if (!response.ok) {
-    throw new Error("Bild nicht verfügbar");
+    throw new Error("Medium nicht verfügbar");
   }
 
   const blob = await response.blob();
@@ -879,7 +964,7 @@ function handleMessagePaste(event) {
   event.preventDefault();
 
   if (state.editingMessage) {
-    alert("Beim Bearbeiten kann kein neues Bild eingefügt werden.");
+    alert("Beim Bearbeiten kann kein neues Medium eingefügt werden.");
     return;
   }
 
@@ -1039,24 +1124,35 @@ function sendTyping(typing, options = {}) {
 }
 
 function selectImage(file) {
-  if (!file || !supportedImageTypes.has(file.type)) {
-    alert("Bitte ein PNG-, JPG-, WEBP- oder GIF-Bild auswählen.");
+  if (!file || !supportedMediaTypes.has(file.type)) {
+    alert("Bitte ein PNG-, JPG-, WEBP-, GIF-, MP4-, WebM- oder MOV-Medium auswählen.");
     return;
   }
 
-  const limit = (state.config.maxUploadMb || 8) * 1024 * 1024;
+  const limit = (state.config.maxUploadMb || 32) * 1024 * 1024;
   if (file.size > limit) {
-    alert(`Das Bild darf maximal ${state.config.maxUploadMb || 8} MB groß sein.`);
+    alert(`Das Medium darf maximal ${state.config.maxUploadMb || 32} MB groß sein.`);
     return;
   }
 
   clearSelectedImage();
   state.selectedImage = file;
   state.selectedImagePreviewUrl = URL.createObjectURL(file);
-  elements.attachmentImage.src = state.selectedImagePreviewUrl;
-  elements.attachmentImage.alt = file.name;
+  const isVideo = file.type.startsWith("video/");
+
+  elements.attachmentImage.classList.toggle("hidden", isVideo);
+  elements.attachmentVideo.classList.toggle("hidden", !isVideo);
+
+  if (isVideo) {
+    elements.attachmentVideo.src = state.selectedImagePreviewUrl;
+    elements.attachmentVideo.load();
+  } else {
+    elements.attachmentImage.src = state.selectedImagePreviewUrl;
+    elements.attachmentImage.alt = file.name;
+  }
+
   elements.attachmentName.textContent = file.name;
-  elements.attachmentSize.textContent = formatBytes(file.size);
+  elements.attachmentSize.textContent = `${isVideo ? "Video" : "Bild"} · ${formatBytes(file.size)}`;
   elements.attachmentPreview.classList.remove("hidden");
 }
 
@@ -1066,21 +1162,77 @@ function clearSelectedImage() {
   }
   state.selectedImage = null;
   state.selectedImagePreviewUrl = "";
+  state.selectedMediaViewOnce = false;
+  elements.viewOnceInput.checked = false;
   elements.attachmentImage.removeAttribute("src");
+  elements.attachmentVideo.pause();
+  elements.attachmentVideo.removeAttribute("src");
+  elements.attachmentVideo.load();
+  elements.attachmentImage.classList.remove("hidden");
+  elements.attachmentVideo.classList.add("hidden");
   elements.attachmentName.textContent = "";
   elements.attachmentSize.textContent = "";
   elements.attachmentPreview.classList.add("hidden");
 }
 
-function openLightbox(src, alt) {
-  elements.lightboxImage.src = src;
-  elements.lightboxImage.alt = alt;
+function openLightbox(message, media, src) {
+  const kind = getMediaKind(media);
+  state.openMediaMessage = {
+    id: message.id,
+    own: message.own,
+    viewOnce: Boolean(media.viewOnce),
+  };
+
+  elements.lightboxImage.classList.toggle("hidden", kind === "video");
+  elements.lightboxVideo.classList.toggle("hidden", kind !== "video");
+
+  if (kind === "video") {
+    elements.lightboxVideo.src = src;
+    elements.lightboxVideo.load();
+    elements.lightboxVideo.play().catch(() => {});
+  } else {
+    elements.lightboxImage.src = src;
+    elements.lightboxImage.alt = media.name || "Bildnachricht";
+  }
+
   elements.lightbox.classList.remove("hidden");
 }
 
-function closeLightbox() {
+function closeLightbox(options = {}) {
+  const openMediaMessage = state.openMediaMessage;
+  state.openMediaMessage = null;
+
   elements.lightbox.classList.add("hidden");
   elements.lightboxImage.removeAttribute("src");
+  elements.lightboxVideo.pause();
+  elements.lightboxVideo.removeAttribute("src");
+  elements.lightboxVideo.load();
+
+  if (openMediaMessage && openMediaMessage.viewOnce && !openMediaMessage.own) {
+    const cachedUrl = state.mediaUrls.get(openMediaMessage.id);
+    if (cachedUrl) {
+      URL.revokeObjectURL(cachedUrl);
+      state.mediaUrls.delete(openMediaMessage.id);
+    }
+
+    markMediaSeen(openMediaMessage.id, options);
+  }
+}
+
+function markMediaSeen(messageId, options = {}) {
+  if (!state.token) {
+    return Promise.resolve();
+  }
+
+  if (options.keepalive && navigator.sendBeacon) {
+    const blob = new Blob(["{}"], { type: "application/json" });
+    navigator.sendBeacon(`/api/messages/${messageId}/read?token=${encodeURIComponent(state.token)}`, blob);
+    return Promise.resolve();
+  }
+
+  return api(`/api/messages/${messageId}/read`, { method: "POST", body: {} }).catch((error) => {
+    console.error(error);
+  });
 }
 
 function setComposerEnabled(enabled) {
@@ -1121,7 +1273,7 @@ function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Bild konnte nicht gelesen werden."));
+    reader.onerror = () => reject(new Error("Medium konnte nicht gelesen werden."));
     reader.readAsDataURL(file);
   });
 }
@@ -1155,34 +1307,70 @@ function labelFor(user) {
   return (state.users[user] && state.users[user].label) || `User ${user}`;
 }
 
+function getMessageMedia(message) {
+  return (message && (message.media || message.image)) || null;
+}
+
+function messageHasMedia(message) {
+  return Boolean(getMessageMedia(message));
+}
+
+function getMessageMediaKind(message) {
+  return getMediaKind(getMessageMedia(message));
+}
+
+function getMediaKind(media) {
+  if (!media) {
+    return "";
+  }
+
+  if (media.kind === "image" || media.kind === "video") {
+    return media.kind;
+  }
+
+  const mimeType = String(media.mimeType || "").toLowerCase();
+  return mimeType.startsWith("video/") ? "video" : "image";
+}
+
+function getMediaLabel(media) {
+  return getMediaKind(media) === "video" ? "Video" : "Bild";
+}
+
 function getMessagePreviewText(message) {
+  const media = getMessageMedia(message);
   const text = String(message.text || "").replace(/\s+/g, " ").trim();
   if (text) {
     return text.length > 140 ? `${text.slice(0, 137)}...` : text;
   }
 
-  if (message.image) {
-    return "Bild";
+  if (media) {
+    return media.viewOnce ? `Einmalansicht ${getMediaLabel(media)}` : getMediaLabel(media);
   }
 
   return "Nachricht";
 }
 
 function getQuoteText(source) {
+  const hasMedia = Boolean(source.hasMedia || source.hasImage);
+  const mediaLabel = source.mediaKind === "video" ? "Video" : "Bild";
   const text = String(source.text || "").trim();
-  if (source.hasImage && text && text !== "Bild") {
-    return `Bild · ${text}`;
+  if (text.startsWith("Einmalansicht ")) {
+    return text;
+  }
+
+  if (hasMedia && text && text !== mediaLabel) {
+    return `${mediaLabel} · ${text}`;
   }
 
   if (text) {
     return text;
   }
 
-  return source.hasImage ? "Bild" : "Nachricht";
+  return hasMedia ? mediaLabel : "Nachricht";
 }
 
 function isSoloEmojiMessage(message) {
-  if (message.image || !message.text) {
+  if (messageHasMedia(message) || !message.text) {
     return false;
   }
 
