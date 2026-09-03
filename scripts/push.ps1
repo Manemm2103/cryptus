@@ -146,7 +146,7 @@ else {
     try {
         $ErrorActionPreference = "Continue"
 
-        $CurrentBranch = (& git branch --show-current).Trim()
+        $CurrentBranchRaw = (& git branch --show-current)
         $BranchExitCode = $LASTEXITCODE
     }
     finally {
@@ -156,6 +156,8 @@ else {
     if ($BranchExitCode -ne 0) {
         throw "Could not determine current Git branch."
     }
+
+    $CurrentBranch = if ($CurrentBranchRaw) { $CurrentBranchRaw.Trim() } else { "" }
 
     if ($CurrentBranch -and $CurrentBranch -ne $Branch) {
         Write-Host "Renaming branch '$CurrentBranch' to '$Branch'..."
@@ -206,10 +208,11 @@ finally {
 }
 
 $HasOrigin = ($RemoteExitCode -eq 0)
+$ExistingOriginUrl = if ($ExistingOrigin) { $ExistingOrigin.Trim() } else { "" }
 
 if (-not $RemoteUrl) {
     if ($HasOrigin) {
-        $RemoteUrl = $ExistingOrigin.Trim()
+        $RemoteUrl = $ExistingOriginUrl
     }
     else {
         if (-not $GithubOwner) {
@@ -232,7 +235,7 @@ Write-Host "Using remote: $RemoteUrl"
 
 if ($HasOrigin) {
 
-    if ($ExistingOrigin.Trim() -ne $RemoteUrl) {
+    if ($ExistingOriginUrl -ne $RemoteUrl) {
         Write-Host "Updating origin remote..."
 
         Invoke-Git remote set-url origin $RemoteUrl
