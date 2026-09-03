@@ -48,6 +48,29 @@
 
         <div id="messageList" class="messages" aria-live="polite"></div>
 
+        <div id="typingIndicator" class="typing-indicator" aria-live="polite">
+          <span class="typing-dot-bubble" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </span>
+          <span id="typingText">schreibt...</span>
+        </div>
+
+        <div id="contextPreview" class="context-preview hidden">
+          <div class="context-accent" aria-hidden="true"></div>
+          <div class="context-copy">
+            <strong id="contextTitle"></strong>
+            <span id="contextText"></span>
+          </div>
+          <button id="cancelContextButton" class="icon-button" type="button" title="Abbrechen" aria-label="Abbrechen">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
+          </button>
+        </div>
+
         <div id="attachmentPreview" class="attachment-preview hidden">
           <img id="attachmentImage" alt="" />
           <div class="attachment-meta">

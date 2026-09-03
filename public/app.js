@@ -12,6 +12,12 @@ const elements = {
   selfBadge: document.getElementById("selfBadge"),
   logoutButton: document.getElementById("logoutButton"),
   messageList: document.getElementById("messageList"),
+  typingIndicator: document.getElementById("typingIndicator"),
+  typingText: document.getElementById("typingText"),
+  contextPreview: document.getElementById("contextPreview"),
+  contextTitle: document.getElementById("contextTitle"),
+  contextText: document.getElementById("contextText"),
+  cancelContextButton: document.getElementById("cancelContextButton"),
   composerForm: document.getElementById("composerForm"),
   messageInput: document.getElementById("messageInput"),
   emojiButton: document.getElementById("emojiButton"),
@@ -55,7 +61,11 @@ const emojis = [
   "✨", "⭐", "🌟", "🔥", "🎉", "🎊", "🎁", "🏆",
   "✅", "☑️", "✔️", "❌", "❓", "❗", "⚠️", "🔒",
   "🔑", "📎", "📸", "🖼️", "📍", "⏰", "☕", "🍕",
-  "🍔", "🍟", "🍫", "🍿", "🍻", "🥂", "🍀", "🚀",
+  "🍔", "🍟", "🌭", "🌮", "🍣", "🍜", "🍪", "🍫",
+  "🍿", "🍓", "🍉", "🍒", "🍻", "🥂", "🍾", "🍀",
+  "🌈", "☀️", "🌙", "⚡", "💧", "🌊", "🏠", "🚗",
+  "✈️", "🚀", "🛎️", "📞", "📱", "💻", "🎧", "🎮",
+  "🎵", "🎬", "💡", "🧠", "💊", "🧾", "💰", "💎",
 ];
 
 const state = {
@@ -65,14 +75,22 @@ const state = {
   users: {},
   config: { maxUploadMb: 8 },
   messages: [],
+  messageRenderKey: null,
   events: null,
   selectedImage: null,
   selectedImagePreviewUrl: "",
+  replyTarget: null,
+  editingMessage: null,
   mediaUrls: new Map(),
   typingTimer: 0,
   typingRequest: null,
   typingSent: false,
   typingSentAt: 0,
+  knownMessageIds: new Set(),
+  hasMessageSnapshot: false,
+  audioContext: null,
+  audioUnlocked: false,
+  openMenuMessageId: null,
 };
 
 initialize();
@@ -86,6 +104,7 @@ function initialize() {
 function bindEvents() {
   elements.loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    unlockNotificationSound();
     elements.loginError.textContent = "";
 
     try {
@@ -128,7 +147,8 @@ function bindEvents() {
     }
   });
 
-  elements.emojiButton.addEventListener("click", () => {
+  elements.emojiButton.addEventListener("click", (event) => {
+    event.stopPropagation();
     elements.emojiPicker.classList.toggle("hidden");
   });
 
@@ -145,6 +165,7 @@ function bindEvents() {
   });
 
   elements.removeAttachmentButton.addEventListener("click", clearSelectedImage);
+  elements.cancelContextButton.addEventListener("click", clearComposerContext);
 
   elements.closeLightboxButton.addEventListener("click", closeLightbox);
   elements.lightbox.addEventListener("click", (event) => {
@@ -161,10 +182,17 @@ function bindEvents() {
   });
 
   document.addEventListener("click", (event) => {
-    if (!elements.emojiPicker.contains(event.target) && event.target !== elements.emojiButton) {
+    if (!elements.emojiPicker.contains(event.target) && !elements.emojiButton.contains(event.target)) {
       elements.emojiPicker.classList.add("hidden");
     }
+
+    if (!event.target.closest(".message-action-menu")) {
+      closeMessageMenu();
+    }
   });
+
+  document.addEventListener("pointerdown", unlockNotificationSound, { once: true });
+  document.addEventListener("keydown", unlockNotificationSound, { once: true });
 
   window.addEventListener("beforeunload", () => {
     sendTyping(false, { keepalive: true });
@@ -211,18 +239,28 @@ function showChat() {
 }
 
 function logout() {
+  sendTyping(false);
+
   if (state.events) {
     state.events.close();
   }
 
+  window.clearTimeout(state.typingTimer);
   state.events = null;
   state.token = "";
   state.user = "";
   state.peer = "";
   state.users = {};
   state.messages = [];
+  state.messageRenderKey = null;
+  state.replyTarget = null;
+  state.editingMessage = null;
+  state.knownMessageIds = new Set();
+  state.hasMessageSnapshot = false;
+  document.title = "Cryptus";
   localStorage.removeItem("cryptus.session");
   clearSelectedImage();
+  renderComposerContext();
   revokeUnusedMedia(new Set());
   showAuth();
 }
@@ -245,21 +283,39 @@ function connectEvents() {
 }
 
 function applySnapshot(snapshot) {
+  const messages = snapshot.messages || [];
+  const nextRenderKey = getMessageRenderKey(messages);
+  const messagesChanged = nextRenderKey !== state.messageRenderKey;
+
   state.peer = snapshot.peer;
   state.users = snapshot.users || {};
   state.config = snapshot.config || state.config;
-  state.messages = snapshot.messages || [];
+  updateMessageNotifications(messages);
+  state.messages = messages;
   renderHeader();
-  renderMessages();
+  syncComposerContext();
+
+  if (messagesChanged) {
+    state.messageRenderKey = nextRenderKey;
+    renderMessages();
+  }
 }
 
 async function sendMessage() {
   const text = elements.messageInput.value.trimEnd();
+  if (state.editingMessage) {
+    await saveEditedMessage(text);
+    return;
+  }
+
   if (!text.trim() && !state.selectedImage) {
     return;
   }
 
-  const payload = { text };
+  const payload = {
+    text,
+    replyTo: state.replyTarget ? state.replyTarget.id : null,
+  };
 
   try {
     sendTyping(false);
@@ -279,7 +335,37 @@ async function sendMessage() {
 
     elements.messageInput.value = "";
     autoResizeTextarea();
+    clearComposerContext();
     clearSelectedImage();
+    elements.emojiPicker.classList.add("hidden");
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    setComposerEnabled(true);
+    elements.messageInput.focus();
+  }
+}
+
+async function saveEditedMessage(text) {
+  if (!state.editingMessage) {
+    return;
+  }
+
+  if (!text.trim() && !state.editingMessage.image) {
+    return;
+  }
+
+  try {
+    sendTyping(false);
+    setComposerEnabled(false);
+    await api(`/api/messages/${state.editingMessage.id}`, {
+      method: "PATCH",
+      body: { text },
+    });
+
+    elements.messageInput.value = "";
+    autoResizeTextarea();
+    clearComposerContext();
     elements.emojiPicker.classList.add("hidden");
   } catch (error) {
     alert(error.message);
@@ -299,15 +385,170 @@ async function markRead(messageId, button) {
   }
 }
 
+function startReply(message) {
+  if (message.redacted) {
+    return;
+  }
+
+  state.editingMessage = null;
+  state.replyTarget = {
+    id: message.id,
+    sender: message.sender,
+    text: getMessagePreviewText(message),
+    hasImage: Boolean(message.image),
+  };
+  renderComposerContext();
+  elements.messageInput.focus();
+}
+
+function startEdit(message) {
+  if (!message.canEdit) {
+    return;
+  }
+
+  clearSelectedImage();
+  state.replyTarget = null;
+  state.editingMessage = {
+    id: message.id,
+    text: message.text || "",
+    image: message.image,
+  };
+  elements.messageInput.value = message.text || "";
+  autoResizeTextarea();
+  renderComposerContext();
+  elements.messageInput.focus();
+}
+
+function clearComposerContext() {
+  state.replyTarget = null;
+  state.editingMessage = null;
+  renderComposerContext();
+}
+
+function syncComposerContext() {
+  if (state.replyTarget) {
+    const target = state.messages.find((message) => message.id === state.replyTarget.id);
+    if (!target || target.redacted) {
+      state.replyTarget = null;
+    } else {
+      state.replyTarget = {
+        id: target.id,
+        sender: target.sender,
+        text: getMessagePreviewText(target),
+        hasImage: Boolean(target.image),
+      };
+    }
+  }
+
+  if (state.editingMessage) {
+    const target = state.messages.find((message) => message.id === state.editingMessage.id);
+    if (!target || !target.canEdit) {
+      state.editingMessage = null;
+      elements.messageInput.value = "";
+      autoResizeTextarea();
+    } else {
+      state.editingMessage = {
+        id: target.id,
+        text: target.text || "",
+        image: target.image,
+      };
+    }
+  }
+
+  renderComposerContext();
+}
+
+function renderComposerContext() {
+  const isEditing = Boolean(state.editingMessage);
+  const isReplying = Boolean(state.replyTarget);
+
+  elements.contextPreview.classList.toggle("hidden", !isEditing && !isReplying);
+  elements.attachButton.disabled = isEditing;
+
+  if (isEditing) {
+    elements.contextPreview.classList.add("editing");
+    elements.contextTitle.textContent = "Nachricht bearbeiten";
+    elements.contextText.textContent = state.editingMessage.text || (state.editingMessage.image ? "Bild" : "Nachricht");
+    return;
+  }
+
+  elements.contextPreview.classList.remove("editing");
+
+  if (isReplying) {
+    elements.contextTitle.textContent = `Antwort an ${state.replyTarget.sender === state.user ? "dich" : labelFor(state.replyTarget.sender)}`;
+    elements.contextText.textContent = getQuoteText(state.replyTarget);
+  }
+}
+
+function getMessageRenderKey(messages) {
+  return messages
+    .map((message) => [
+      message.id,
+      message.readAt || "",
+      message.editedAt || "",
+      message.text || "",
+      message.image ? "image" : "",
+      message.replyTo ? `${message.replyTo.id}:${message.replyTo.text}:${message.replyTo.hasImage ? 1 : 0}` : "",
+      message.canEdit ? 1 : 0,
+    ].join("|"))
+    .join("~");
+}
+
 function renderHeader() {
   const peer = state.users[state.peer] || { label: `User ${state.peer}`, online: false };
   const self = state.users[state.user] || { label: `User ${state.user}` };
 
   elements.peerAvatar.textContent = state.peer || "?";
   elements.peerName.textContent = peer.label;
-  elements.peerStatus.textContent = peer.typing ? "schreibt..." : peer.online ? "Online" : "Offline";
+  elements.peerStatus.textContent = getPeerStatus(peer);
   elements.peerStatus.classList.toggle("typing", Boolean(peer.typing));
   elements.selfBadge.textContent = self.label;
+  renderTypingIndicator(peer);
+}
+
+function getPeerStatus(peer) {
+  if (peer.typing) {
+    return "schreibt...";
+  }
+
+  if (peer.online) {
+    return "Online";
+  }
+
+  if (peer.lastSeenAt) {
+    return `zuletzt online ${formatLastSeen(peer.lastSeenAt)}`;
+  }
+
+  return "Offline";
+}
+
+function renderTypingIndicator(peer) {
+  const isTyping = Boolean(peer && peer.typing);
+  elements.typingIndicator.classList.toggle("is-visible", isTyping);
+  elements.typingText.textContent = isTyping ? `${peer.label} schreibt...` : "";
+}
+
+function updateMessageNotifications(messages) {
+  const nextIds = new Set(messages.map((message) => message.id));
+  const unreadCount = messages.filter((message) => !message.own && !message.readAt && !message.redacted).length;
+
+  document.title = unreadCount > 0 ? `(${unreadCount}) Cryptus` : "Cryptus";
+
+  if (state.hasMessageSnapshot) {
+    const hasNewIncoming = messages.some((message) => (
+      !state.knownMessageIds.has(message.id) &&
+      !message.own &&
+      !message.readAt &&
+      !message.redacted
+    ));
+
+    if (hasNewIncoming) {
+      playNotificationSound();
+    }
+  }
+
+  state.knownMessageIds = nextIds;
+  state.hasMessageSnapshot = true;
 }
 
 function renderMessages() {
@@ -339,8 +580,10 @@ function renderMessages() {
 }
 
 function renderMessage(message) {
+  const soloEmoji = isSoloEmojiMessage(message);
   const article = document.createElement("article");
-  article.className = `message ${message.own ? "own" : "peer"}${message.redacted ? " redacted" : ""}`;
+  article.className = `message ${message.own ? "own" : "peer"}${message.redacted ? " redacted" : ""}${soloEmoji ? " solo-emoji" : ""}`;
+  article.dataset.messageId = message.id;
 
   const meta = document.createElement("div");
   meta.className = "message-meta";
@@ -350,9 +593,13 @@ function renderMessage(message) {
 
   const time = document.createElement("time");
   time.dateTime = new Date(message.createdAt).toISOString();
-  time.textContent = formatTime(message.createdAt);
+  time.textContent = message.editedAt ? `${formatTime(message.createdAt)} · bearbeitet` : formatTime(message.createdAt);
 
-  meta.append(from, time);
+  const metaTail = document.createElement("div");
+  metaTail.className = "message-meta-tail";
+  metaTail.append(time);
+
+  meta.append(from, metaTail);
   article.append(meta);
 
   if (message.redacted) {
@@ -363,6 +610,10 @@ function renderMessage(message) {
     redacted.append(label);
     article.append(redacted);
     return article;
+  }
+
+  if (message.replyTo) {
+    article.append(renderReplyQuote(message.replyTo));
   }
 
   if (message.text) {
@@ -385,7 +636,97 @@ function renderMessage(message) {
     article.append(readButton);
   }
 
+  article.append(renderMessageMenu(message));
+
   return article;
+}
+
+function renderMessageMenu(message) {
+  const menu = document.createElement("div");
+  menu.className = "message-action-menu";
+
+  const trigger = document.createElement("button");
+  trigger.className = "message-menu-trigger";
+  trigger.type = "button";
+  trigger.title = "Nachrichtenoptionen";
+  trigger.setAttribute("aria-label", "Nachrichtenoptionen");
+  trigger.setAttribute("aria-expanded", state.openMenuMessageId === message.id ? "true" : "false");
+  trigger.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+  trigger.addEventListener("click", (event) => {
+    event.stopPropagation();
+    state.openMenuMessageId = state.openMenuMessageId === message.id ? null : message.id;
+    renderMessages();
+  });
+  menu.append(trigger);
+
+  if (state.openMenuMessageId === message.id) {
+    const list = document.createElement("div");
+    list.className = "message-menu-list";
+    list.setAttribute("role", "menu");
+
+    const replyItem = document.createElement("button");
+    replyItem.type = "button";
+    replyItem.setAttribute("role", "menuitem");
+    replyItem.textContent = "Zitieren";
+    replyItem.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeMessageMenu();
+      startReply(message);
+    });
+    list.append(replyItem);
+
+    if (message.canEdit) {
+      const editItem = document.createElement("button");
+      editItem.type = "button";
+      editItem.setAttribute("role", "menuitem");
+      editItem.textContent = "Bearbeiten";
+      editItem.addEventListener("click", (event) => {
+        event.stopPropagation();
+        closeMessageMenu();
+        startEdit(message);
+      });
+      list.append(editItem);
+    }
+
+    menu.append(list);
+  }
+
+  return menu;
+}
+
+function closeMessageMenu() {
+  if (!state.openMenuMessageId) {
+    return;
+  }
+
+  state.openMenuMessageId = null;
+  renderMessages();
+}
+
+function renderReplyQuote(replyTo) {
+  const quote = document.createElement("button");
+  quote.className = "reply-quote";
+  quote.type = "button";
+  quote.title = "Zitierte Nachricht";
+  quote.setAttribute("aria-label", "Zitierte Nachricht");
+
+  const author = document.createElement("strong");
+  author.textContent = replyTo.sender === state.user ? "Du" : labelFor(replyTo.sender);
+
+  const text = document.createElement("span");
+  text.textContent = getQuoteText(replyTo);
+
+  quote.append(author, text);
+  quote.addEventListener("click", () => {
+    const target = document.querySelector(`[data-message-id="${replyTo.id}"]`);
+    if (target) {
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      target.classList.add("message-highlight");
+      window.setTimeout(() => target.classList.remove("message-highlight"), 1200);
+    }
+  });
+
+  return quote;
 }
 
 function renderImage(message) {
@@ -582,7 +923,7 @@ function closeLightbox() {
 
 function setComposerEnabled(enabled) {
   elements.messageInput.disabled = !enabled;
-  elements.attachButton.disabled = !enabled;
+  elements.attachButton.disabled = !enabled || Boolean(state.editingMessage);
   elements.emojiButton.disabled = !enabled;
   document.getElementById("sendButton").disabled = !enabled;
 }
@@ -632,8 +973,14 @@ function insertAtCursor(input, value) {
 }
 
 function autoResizeTextarea() {
-  elements.messageInput.style.height = "auto";
-  elements.messageInput.style.height = `${Math.min(elements.messageInput.scrollHeight, 150)}px`;
+  const previousScrollTop = elements.messageList.scrollTop;
+  const nextMinHeight = 46;
+
+  elements.messageInput.style.height = `${nextMinHeight}px`;
+  const nextHeight = Math.min(Math.max(elements.messageInput.scrollHeight, nextMinHeight), 150);
+  elements.messageInput.style.height = `${nextHeight}px`;
+  elements.messageInput.style.overflowY = elements.messageInput.scrollHeight > 150 ? "auto" : "hidden";
+  elements.messageList.scrollTop = previousScrollTop;
 }
 
 function scrollToBottom() {
@@ -644,6 +991,139 @@ function scrollToBottom() {
 
 function labelFor(user) {
   return (state.users[user] && state.users[user].label) || `User ${user}`;
+}
+
+function getMessagePreviewText(message) {
+  const text = String(message.text || "").replace(/\s+/g, " ").trim();
+  if (text) {
+    return text.length > 140 ? `${text.slice(0, 137)}...` : text;
+  }
+
+  if (message.image) {
+    return "Bild";
+  }
+
+  return "Nachricht";
+}
+
+function getQuoteText(source) {
+  const text = String(source.text || "").trim();
+  if (source.hasImage && text && text !== "Bild") {
+    return `Bild · ${text}`;
+  }
+
+  if (text) {
+    return text;
+  }
+
+  return source.hasImage ? "Bild" : "Nachricht";
+}
+
+function isSoloEmojiMessage(message) {
+  if (message.image || !message.text) {
+    return false;
+  }
+
+  const text = message.text.trim();
+  if (!text || /\s/u.test(text)) {
+    return false;
+  }
+
+  return graphemes(text).length === 1 && /\p{Extended_Pictographic}/u.test(text);
+}
+
+function graphemes(text) {
+  if (window.Intl && Intl.Segmenter) {
+    return Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text), (segment) => segment.segment);
+  }
+
+  return Array.from(text);
+}
+
+function unlockNotificationSound() {
+  const context = getAudioContext();
+  if (!context) {
+    return;
+  }
+
+  if (context.state === "suspended") {
+    context.resume().catch(() => {});
+  }
+
+  state.audioUnlocked = true;
+}
+
+function getAudioContext() {
+  if (state.audioContext) {
+    return state.audioContext;
+  }
+
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) {
+    return null;
+  }
+
+  state.audioContext = new AudioContextClass();
+  return state.audioContext;
+}
+
+function playNotificationSound() {
+  const context = getAudioContext();
+  if (!context) {
+    return;
+  }
+
+  if (context.state === "suspended") {
+    context.resume().then(() => playNotificationSound()).catch(() => {});
+    return;
+  }
+
+  const now = context.currentTime;
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+
+  oscillator.type = "sine";
+  oscillator.frequency.setValueAtTime(420, now);
+  oscillator.frequency.exponentialRampToValueAtTime(760, now + 0.09);
+  oscillator.frequency.exponentialRampToValueAtTime(520, now + 0.18);
+
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.075, now + 0.025);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(now);
+  oscillator.stop(now + 0.24);
+}
+
+function formatLastSeen(timestamp) {
+  const date = new Date(timestamp);
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+
+  const time = new Intl.DateTimeFormat("de-DE", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+
+  if (sameDay) {
+    return `heute um ${time}`;
+  }
+
+  if (date.toDateString() === yesterday.toDateString()) {
+    return `gestern um ${time}`;
+  }
+
+  return new Intl.DateTimeFormat("de-DE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function formatTime(timestamp) {

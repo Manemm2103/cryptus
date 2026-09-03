@@ -19,6 +19,9 @@ const MAX_JSON_BYTES = Math.ceil(MAX_UPLOAD_BYTES * 1.45) + 512 * 1024;
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_HOURS || 12) * 60 * 60 * 1000;
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const TYPING_TTL_MS = 3500;
+const MESSAGE_MAX_AGE_MS = Number(process.env.MESSAGE_MAX_HOURS || 24) * 60 * 60 * 1000;
+const READ_RETENTION_MS = Number(process.env.READ_DELETE_MINUTES || 30) * 60 * 1000;
+const CLEANUP_INTERVAL_MS = 60 * 1000;
 
 const REQUIRED_ENV = ["USER_A_PASSWORD", "USER_B_PASSWORD"];
 const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
@@ -81,7 +84,10 @@ const typingExpiryTimers = new Map();
 
 let state = {
   messages: [],
+  users: createUserState(),
 };
+
+let saveQueue = Promise.resolve();
 
 main().catch((error) => {
   console.error(error);
@@ -91,6 +97,14 @@ main().catch((error) => {
 async function main() {
   await ensureStorage();
   state = await loadState();
+  await cleanupExpiredMessages({ broadcast: false });
+
+  const cleanupTimer = setInterval(() => {
+    cleanupExpiredMessages().catch((error) => console.error("Cleanup failed:", error));
+  }, CLEANUP_INTERVAL_MS);
+  if (typeof cleanupTimer.unref === "function") {
+    cleanupTimer.unref();
+  }
 
   const server = http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {
@@ -143,18 +157,20 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === "GET" && pathname === "/api/events") {
-    handleEvents(req, res, url);
+    await handleEvents(req, res, url);
     return;
   }
 
   if (req.method === "GET" && pathname === "/api/state") {
     const session = requireSession(req, url);
+    await cleanupExpiredMessages();
     sendJson(res, 200, safeStateFor(session.user));
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/messages") {
     const session = requireSession(req, url);
+    await cleanupExpiredMessages();
     await handleCreateMessage(req, res, session.user);
     return;
   }
@@ -165,9 +181,18 @@ async function handleRequest(req, res) {
     return;
   }
 
+  const editMatch = pathname.match(/^\/api\/messages\/([0-9a-f-]+)$/i);
+  if (req.method === "PATCH" && editMatch) {
+    const session = requireSession(req, url);
+    await cleanupExpiredMessages();
+    await handleEditMessage(req, res, session.user, editMatch[1]);
+    return;
+  }
+
   const readMatch = pathname.match(/^\/api\/messages\/([0-9a-f-]+)\/read$/i);
   if (req.method === "POST" && readMatch) {
     const session = requireSession(req, url);
+    await cleanupExpiredMessages();
     await handleReadMessage(res, session.user, readMatch[1]);
     return;
   }
@@ -175,6 +200,7 @@ async function handleRequest(req, res) {
   const mediaMatch = pathname.match(/^\/api\/media\/([0-9a-f-]+)$/i);
   if ((req.method === "GET" || req.method === "HEAD") && mediaMatch) {
     const session = requireSession(req, url);
+    await cleanupExpiredMessages();
     await handleMedia(req, res, session.user, mediaMatch[1]);
     return;
   }
@@ -216,6 +242,8 @@ async function handleLogin(req, res) {
   const token = crypto.randomBytes(32).toString("base64url");
   const expiresAt = Date.now() + SESSION_TTL_MS;
   sessions.set(token, { user, expiresAt });
+  setLastSeen(user);
+  await saveState();
 
   sendJson(res, 200, {
     token,
@@ -225,8 +253,9 @@ async function handleLogin(req, res) {
   });
 }
 
-function handleEvents(req, res, url) {
+async function handleEvents(req, res, url) {
   const session = requireSession(req, url);
+  await cleanupExpiredMessages();
   const clients = sseClients.get(session.user);
 
   res.writeHead(200, {
@@ -238,6 +267,8 @@ function handleEvents(req, res, url) {
   res.write(": connected\n\n");
 
   clients.add(res);
+  setLastSeen(session.user);
+  saveState().catch((error) => console.error("Could not save last seen:", error));
   sendEvent(res, "state", safeStateFor(session.user));
   broadcastState();
 
@@ -250,6 +281,8 @@ function handleEvents(req, res, url) {
     clients.delete(res);
     if (clients.size === 0) {
       setTyping(session.user, false);
+      setLastSeen(session.user);
+      saveState().catch((error) => console.error("Could not save last seen:", error));
     }
     broadcastState();
   });
@@ -261,6 +294,7 @@ async function handleCreateMessage(req, res, sender) {
   const hasText = text.trim().length > 0;
   const imagePayload = body.image || null;
   const hasImage = Boolean(imagePayload && imagePayload.data);
+  const replyTo = body.replyTo ? createReplyQuote(String(body.replyTo), sender) : null;
 
   if (!hasText && !hasImage) {
     sendJson(res, 400, { error: "Nachricht oder Bild fehlt." });
@@ -281,7 +315,9 @@ async function handleCreateMessage(req, res, sender) {
     recipient,
     text: hasText ? text : "",
     image,
+    replyTo,
     createdAt: Date.now(),
+    editedAt: null,
     readAt: null,
   };
 
@@ -289,6 +325,40 @@ async function handleCreateMessage(req, res, sender) {
   setTyping(sender, false);
   await saveState();
   sendJson(res, 201, { message: safeMessageFor(message, sender) });
+  broadcastState();
+}
+
+async function handleEditMessage(req, res, user, messageId) {
+  const message = state.messages.find((item) => item.id === messageId);
+
+  if (!message || (message.sender !== user && message.recipient !== user)) {
+    sendJson(res, 404, { error: "Nachricht nicht gefunden." });
+    return;
+  }
+
+  if (message.sender !== user) {
+    sendJson(res, 403, { error: "Nur eigene Nachrichten können bearbeitet werden." });
+    return;
+  }
+
+  if (message.readAt) {
+    sendJson(res, 409, { error: "Gelesene Nachrichten können nicht mehr bearbeitet werden." });
+    return;
+  }
+
+  const body = await readJson(req, 32 * 1024);
+  const text = sanitizeText(body.text || "");
+  if (!text.trim() && !message.image) {
+    sendJson(res, 400, { error: "Nachricht darf nicht leer sein." });
+    return;
+  }
+
+  message.text = text;
+  message.editedAt = Date.now();
+  setTyping(user, false);
+
+  await saveState();
+  sendJson(res, 200, { message: safeMessageFor(message, user) });
   broadcastState();
 }
 
@@ -484,24 +554,71 @@ async function loadState() {
   });
 
   if (!raw) {
-    return { messages: [] };
+    return {
+      messages: [],
+      users: createUserState(),
+    };
   }
 
   const parsed = JSON.parse(raw);
   if (!parsed || !Array.isArray(parsed.messages)) {
-    return { messages: [] };
+    return {
+      messages: [],
+      users: createUserState(parsed && parsed.users),
+    };
   }
 
   return {
     messages: parsed.messages.filter(isValidMessage),
+    users: createUserState(parsed.users),
   };
 }
 
-async function saveState() {
+function saveState() {
+  const task = saveQueue.then(writeState);
+  saveQueue = task.catch(() => {});
+  return task;
+}
+
+async function writeState() {
   await ensureStorage();
   const tmpFile = `${STATE_FILE}.tmp`;
   await fsp.writeFile(tmpFile, JSON.stringify(state, null, 2));
   await fsp.rename(tmpFile, STATE_FILE);
+}
+
+async function cleanupExpiredMessages(options = {}) {
+  const now = Date.now();
+  const keptMessages = [];
+  const removedMessages = [];
+
+  for (const message of state.messages) {
+    const tooOld = now - message.createdAt >= MESSAGE_MAX_AGE_MS;
+    const readTooLongAgo = message.readAt && now - message.readAt >= READ_RETENTION_MS;
+
+    if (tooOld || readTooLongAgo) {
+      removedMessages.push(message);
+    } else {
+      keptMessages.push(message);
+    }
+  }
+
+  if (removedMessages.length === 0) {
+    return false;
+  }
+
+  state.messages = keptMessages;
+  for (const message of removedMessages) {
+    if (message.image && message.image.filename) {
+      await deleteUpload(message.image.filename);
+    }
+  }
+
+  await saveState();
+  if (options.broadcast !== false) {
+    broadcastState();
+  }
+  return true;
 }
 
 function isValidMessage(message) {
@@ -588,6 +705,8 @@ function safeStateFor(user) {
     config: {
       maxUploadMb: MAX_UPLOAD_MB,
       sessionTtlHours: SESSION_TTL_MS / 60 / 60 / 1000,
+      messageMaxHours: MESSAGE_MAX_AGE_MS / 60 / 60 / 1000,
+      readDeleteMinutes: READ_RETENTION_MS / 60 / 1000,
     },
     messages: state.messages.map((message) => safeMessageFor(message, user)),
   };
@@ -603,8 +722,11 @@ function safeMessageFor(message, user) {
     recipient: message.recipient,
     own: message.sender === user,
     createdAt: message.createdAt,
+    editedAt: !redacted && allowed ? message.editedAt || null : null,
     readAt: message.readAt,
     redacted,
+    canEdit: !redacted && message.sender === user && !message.readAt,
+    replyTo: !redacted && allowed && message.replyTo ? safeReplyQuote(message.replyTo) : null,
     text: !redacted && allowed ? message.text : "",
     image: !redacted && allowed && message.image
       ? {
@@ -614,6 +736,45 @@ function safeMessageFor(message, user) {
         }
       : null,
   };
+}
+
+function createReplyQuote(messageId, user) {
+  const target = state.messages.find((message) => message.id === messageId);
+
+  if (!target || (target.sender !== user && target.recipient !== user) || target.readAt) {
+    throw httpError(400, "Antwort-Zitat ist nicht mehr verfügbar.");
+  }
+
+  return {
+    id: target.id,
+    sender: target.sender,
+    text: summarizeMessage(target),
+    hasImage: Boolean(target.image),
+    createdAt: target.createdAt,
+  };
+}
+
+function safeReplyQuote(replyTo) {
+  return {
+    id: replyTo.id,
+    sender: replyTo.sender,
+    text: replyTo.text || "",
+    hasImage: Boolean(replyTo.hasImage),
+    createdAt: replyTo.createdAt || null,
+  };
+}
+
+function summarizeMessage(message) {
+  const text = String(message.text || "").replace(/\s+/g, " ").trim();
+  if (text) {
+    return text.length > 140 ? `${text.slice(0, 137)}...` : text;
+  }
+
+  if (message.image) {
+    return "Bild";
+  }
+
+  return "Nachricht";
 }
 
 function publicUsers() {
@@ -627,9 +788,31 @@ function publicUsers() {
         label: user.label,
         online: sseClients.get(user.id).size > 0,
         typing: isTyping(user.id),
+        lastSeenAt: state.users[user.id] ? state.users[user.id].lastSeenAt : null,
       },
     ]),
   );
+}
+
+function createUserState(source = {}) {
+  return Object.fromEntries(
+    Object.keys(USERS || { A: true, B: true }).map((user) => {
+      const value = source && source[user] && typeof source[user].lastSeenAt === "number"
+        ? source[user].lastSeenAt
+        : null;
+      return [user, { lastSeenAt: value }];
+    }),
+  );
+}
+
+function setLastSeen(user, timestamp = Date.now()) {
+  if (!state.users) {
+    state.users = createUserState();
+  }
+  if (!state.users[user]) {
+    state.users[user] = { lastSeenAt: null };
+  }
+  state.users[user].lastSeenAt = timestamp;
 }
 
 function setTyping(user, typing) {
